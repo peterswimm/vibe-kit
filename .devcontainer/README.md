@@ -21,7 +21,7 @@ Innovation Kits specific to different Microsoft Research projects can be added t
         1. Verify proper tool installation - Confirms all development tools are available
     2. Show version information - Shows versions of key tools (Python, Node.js, uv, npm, etc.)
         3. Install `backend` Python packages - Installs Python dependencies via `uv`
-    4. Install `frontend` Node.js modules - Installs Node.js dependencies via `npm`
+        4. Install `frontend` Node.js modules - Installs Node.js dependencies via `npm`
         5. Install MCP servers and ensure that they are initialized - Prepares GitHub Copilot MCP servers for faster initial Copilot chat startup
     3) **Look for the clear "SETUP COMPLETE!" banner in the terminal to know when everything is ready.**
 3) Run and view the boilerplate website

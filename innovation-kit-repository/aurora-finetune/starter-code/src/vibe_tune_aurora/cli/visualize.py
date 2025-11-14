@@ -17,15 +17,11 @@ from vibe_tune_aurora.evaluation import load_model
 from vibe_tune_aurora.types import SupervisedTrainingDataPair
 
 
-def _extract_surface_field(
-    batch, var_name: str
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _extract_surface_field(batch, var_name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return (data, lat, lon) arrays for a surface variable from an Aurora Batch."""
     if var_name not in batch.surf_vars:
         available = ", ".join(sorted(batch.surf_vars.keys()))
-        raise KeyError(
-            f"Variable '{var_name}' not found in batch. Available: {available}"
-        )
+        raise KeyError(f"Variable '{var_name}' not found in batch. Available: {available}")
 
     tensor = batch.surf_vars[var_name]
     # Expect shape (batch, time, lat, lon); take first batch + latest time slice
@@ -79,9 +75,7 @@ def visualize_prediction(
     timestamp = target_batch.metadata.time[0]
 
     # Plot prediction, target, and absolute error
-    fig, axes = plt.subplots(
-        1, 3 if difference else 2, figsize=(16, 5), constrained_layout=True
-    )
+    fig, axes = plt.subplots(1, 3 if difference else 2, figsize=(16, 5), constrained_layout=True)
     if not isinstance(axes, np.ndarray):
         axes = np.array([axes])
 
@@ -101,7 +95,7 @@ def visualize_prediction(
         ax.set_title(title)
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
-        ax.set_ylim(lat.max(), lat.min())  # Keep north at top
+        ax.set_ylim(lat.min(), lat.max())
         plt.colorbar(pcm, ax=ax, orientation="vertical", label=var_name)
 
     fig.suptitle(
@@ -121,9 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render prediction vs. target heatmaps for a finetuned Aurora checkpoint",
     )
-    parser.add_argument(
-        "--checkpoint", type=Path, required=True, help="Path to .ckpt file"
-    )
+    parser.add_argument("--checkpoint", type=Path, required=True, help="Path to .ckpt file")
     parser.add_argument(
         "--single_level_file",
         type=Path,

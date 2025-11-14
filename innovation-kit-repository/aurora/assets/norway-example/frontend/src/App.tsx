@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Body1,
-  Caption1,
+  Caption1 as CaptionNote,
   Card,
   CardHeader,
   Dropdown,
@@ -15,17 +15,23 @@ import {
   shorthands,
   tokens,
   type DropdownOnSelectData,
+  type SwitchOnChangeData,
   type SliderOnChangeData,
 } from "@fluentui/react-components";
 import { MapContainer, TileLayer } from "react-leaflet";
 import {
   auroraForecast,
+  type Forecast,
   type ForecastCell,
   type ForecastStep,
 } from "./data/auroraForecast";
-import { auroraForecast as auroraPredictions } from "./data/auroraForecastPredictions";
 import { HeatmapOverlay } from "./components/HeatmapOverlay";
 import { convertToGrid } from "./utils/gridUtils";
+import {
+  ColormapName,
+  getColormapColor,
+  thermalDefaultStops,
+} from "./utils/colormaps";
 
 const useStyles = makeStyles({
   page: {
@@ -77,6 +83,9 @@ const useStyles = makeStyles({
     gap: tokens.spacingVerticalXS,
     minWidth: "240px",
   },
+  switchHint: {
+    color: tokens.colorNeutralForeground2,
+  },
   mapSection: {
     flexGrow: 1,
     display: "flex",
@@ -114,10 +123,12 @@ const useStyles = makeStyles({
     position: "absolute",
     bottom: "20px",
     right: "20px",
-    backgroundColor: "rgba(255, 255, 255, 0.95)",
+    backgroundColor: tokens.colorNeutralBackground1,
     ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
     borderRadius: tokens.borderRadiusMedium,
-    boxShadow: tokens.shadow8,
+    boxShadow: tokens.shadow16,
+    ...shorthands.border("1px", "solid", tokens.colorNeutralStroke1),
+    backdropFilter: "blur(6px)",
     zIndex: 1000,
     minWidth: "160px",
   },
@@ -145,12 +156,14 @@ const useStyles = makeStyles({
   },
   legendLabel: {
     fontSize: tokens.fontSizeBase200,
-    color: tokens.colorNeutralForeground2,
+    color: tokens.colorNeutralForeground1,
   },
 });
 
 const variableOptions = ["windSpeed", "temperature", "pressure"] as const;
 type VariableKey = (typeof variableOptions)[number];
+
+type LegendStop = { value: number; label: string; color: string };
 
 const variableLabels: Record<VariableKey, string> = {
   windSpeed: "Wind speed",
@@ -158,9 +171,11 @@ const variableLabels: Record<VariableKey, string> = {
   pressure: "Sea-level pressure",
 };
 
+const degreeEntity = "\u00B0"; // HTML &deg; escape rendered via unicode
+
 const valueUnits: Record<VariableKey, string> = {
   windSpeed: "m/s",
-  temperature: "°C",
+  temperature: `${degreeEntity}C`,
   pressure: "hPa",
 };
 
@@ -173,69 +188,127 @@ const formatter = new Intl.DateTimeFormat("en-GB", {
   timeZone: "UTC",
 });
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
+type HeatmapColormap = ColormapName;
 
-function interpolateHue(value: number, domain: [number, number]) {
-  const [min, max] = domain;
-  if (max - min <= 0.0001) {
-    return 200;
+const norwayBounds: [[number, number], [number, number]] = [
+  [57, 4],
+  [72.75, 31.75],
+];
+
+const mapCenter: [number, number] = [64.875, 17.875];
+
+type PredictionModule = { auroraForecast: Forecast };
+
+const predictionModules = (
+  import.meta as unknown as {
+    glob: (
+      pattern: string,
+      options: { eager: boolean }
+    ) => Record<string, PredictionModule>;
   }
-  const ratio = clamp((value - min) / (max - min), 0, 1);
-  return 220 - ratio * 180; // 220 (blue) -> 40 (amber)
-}
+).glob("./data/auroraForecastPredictions.ts", { eager: true });
 
-function getMarkerColor(value: number, domain: [number, number]) {
-  const hue = interpolateHue(value, domain);
-  return `hsl(${hue}, 70%, 48%)`;
-}
+const emptyPredictions: Forecast = {
+  generatedAt: "",
+  region: {
+    name: "Aurora forecast",
+    center: mapCenter,
+  },
+  variableRanges: {
+    windSpeed: [0, 0],
+    temperature: [0, 0],
+    pressure: [0, 0],
+  },
+  steps: [],
+};
 
-function getMarkerRadius(variable: VariableKey, value: number) {
-  if (variable === "windSpeed") {
-    return clamp(6 + value * 0.6, 8, 20);
-  }
+// Load predictions lazily so the UI runs before the generated module exists.
+const auroraPredictions =
+  Object.values(predictionModules)[0]?.auroraForecast ?? emptyPredictions;
+
+function rgbToCss([r, g, b]: [number, number, number]) {
+  const clampComponent = (value: number) =>
+    Math.max(0, Math.min(255, Math.round(value)));
+  return `rgb(${clampComponent(r)}, ${clampComponent(g)}, ${clampComponent(
+    b
+  )})`;
+}
+function getColormapName(variable: VariableKey): HeatmapColormap {
   if (variable === "temperature") {
-    return clamp(10 + value * 0.4, 6, 18);
+    return "thermal";
   }
-  return clamp(8 + (1020 - value) * 0.15, 6, 18);
+  if (variable === "windSpeed") {
+    return "cividis";
+  }
+  return "plasma";
+}
+
+function formatLegendLabel(variable: VariableKey, value: number) {
+  if (variable === "temperature") {
+    return `${value.toFixed(1)}${degreeEntity}C`;
+  }
+  if (variable === "windSpeed") {
+    return `${value.toFixed(1)} m/s`;
+  }
+  return `${value.toFixed(0)} hPa`;
+}
+
+function formatRangeValue(variable: VariableKey, value: number) {
+  if (variable === "temperature") {
+    return value.toFixed(1);
+  }
+  if (variable === "windSpeed") {
+    return value.toFixed(1);
+  }
+  return value.toFixed(0);
 }
 
 function getLegendStops(
   variable: VariableKey,
-  range: [number, number]
-): Array<{ value: number; label: string; color: string }> {
+  range: [number, number],
+  colormap: HeatmapColormap,
+  gamma: number
+): LegendStop[] {
   const [min, max] = range;
   const stops = 5;
-  const step = (max - min) / (stops - 1);
+  const step = stops > 1 ? (max - min) / (stops - 1) : 0;
 
-  return Array.from({ length: stops }, (_, i) => {
-    const value = min + step * i;
-    const normalized = (value - min) / (max - min);
-    const color = getMarkerColor(value, range);
+  const values = Array.from(
+    { length: stops },
+    (_, index) => min + step * index
+  );
 
-    let label: string;
-    if (variable === "windSpeed") {
-      label = `${value.toFixed(0)} m/s`;
-    } else if (variable === "temperature") {
-      label = `${value.toFixed(0)}°C`;
-    } else {
-      label = `${value.toFixed(0)} hPa`;
-    }
-
-    return { value, label, color };
-  }).reverse(); // High to low
+  return values
+    .map((value) => {
+      const normalized = max > min ? (value - min) / (max - min) : 0;
+      const adjusted = gamma === 1 ? normalized : Math.pow(normalized, gamma);
+      return {
+        value,
+        label: formatLegendLabel(variable, value),
+        color: rgbToCss(
+          getColormapColor(
+            adjusted,
+            colormap,
+            colormap === "thermal" ? thermalDefaultStops : undefined
+          )
+        ),
+      };
+    })
+    .reverse();
 }
 
-function getVariableRange(key: VariableKey): [number, number] {
+function getVariableRange(
+  dataset: typeof auroraForecast,
+  key: VariableKey
+): [number, number] {
   switch (key) {
     case "windSpeed":
-      return auroraForecast.variableRanges.windSpeed;
+      return dataset.variableRanges.windSpeed;
     case "temperature":
-      return auroraForecast.variableRanges.temperature;
+      return dataset.variableRanges.temperature;
     case "pressure":
     default:
-      return auroraForecast.variableRanges.pressure;
+      return dataset.variableRanges.pressure;
   }
 }
 
@@ -264,9 +337,14 @@ function parseSummaryMetrics(summary: string) {
   }
 
   // Extract temperature
-  const tempMatch = summary.match(/Average temperature ([+-]?[\d.]+) °C/);
+  const tempMatch = summary.match(
+    new RegExp(`Average temperature ([+-]?[\\d.]+) ${degreeEntity}C`)
+  );
   if (tempMatch) {
-    metrics.push({ label: "Avg temperature", value: `${tempMatch[1]} °C` });
+    metrics.push({
+      label: "Avg temperature",
+      value: `${tempMatch[1]} ${degreeEntity}C`,
+    });
   }
 
   // Extract pressure range
@@ -288,12 +366,33 @@ export default function App() {
   const [stepIndex, setStepIndex] = useState(0);
   const [variable, setVariable] = useState<VariableKey>("windSpeed");
   const [showPredictions, setShowPredictions] = useState(false);
+  const predictionsAvailable = auroraPredictions.steps.length > 0;
+
+  useEffect(() => {
+    if (!predictionsAvailable && showPredictions) {
+      setShowPredictions(false);
+    }
+  }, [predictionsAvailable, showPredictions]);
 
   // Switch between CDS observations and Aurora predictions
   const activeDataset = showPredictions ? auroraPredictions : auroraForecast;
   const step = activeDataset.steps[stepIndex];
-  const range = getVariableRange(variable);
+  const range = getVariableRange(activeDataset, variable);
   const summaryMetrics = parseSummaryMetrics(step.summary);
+  const colormap = getColormapName(variable);
+  const gamma = variable === "windSpeed" ? 0.85 : 1;
+
+  const gridData = useMemo(() => {
+    if (!step?.cells?.length) {
+      return null;
+    }
+    return convertToGrid(step, variable);
+  }, [step, variable]);
+
+  const legendStops = useMemo<LegendStop[]>(
+    () => getLegendStops(variable, range, colormap, gamma),
+    [colormap, gamma, range, variable]
+  );
 
   const sliderMarks = useMemo(
     () =>
@@ -313,7 +412,7 @@ export default function App() {
             Learn to use Aurora&apos;s weather forecasting AI. Start with ERA5
             observations, run your first inference, and visualize
             predictions—all in one interactive prototype covering Norway&apos;s
-            coastal region (48×48 grid, 6-hour steps).
+            mainland (64×112 grid, 6-hour steps).
           </Body1>
           <Body1 className={styles.tutorialHint}>
             <strong>Ready for the next step?</strong> Ask GitHub Copilot to
@@ -325,7 +424,11 @@ export default function App() {
               <Switch
                 id="data-source"
                 checked={showPredictions}
-                onChange={(_, data) => {
+                disabled={!predictionsAvailable}
+                onChange={(_event: unknown, data: SwitchOnChangeData) => {
+                  if (!predictionsAvailable) {
+                    return;
+                  }
                   setShowPredictions(data.checked);
                   setStepIndex(0); // Reset to first step when switching
                 }}
@@ -335,6 +438,11 @@ export default function App() {
                     : "CDS Observations (June 1-7)"
                 }
               />
+              {!predictionsAvailable && (
+                <CaptionNote className={styles.switchHint}>
+                  Run the inference script to enable Aurora predictions.
+                </CaptionNote>
+              )}
             </div>
             <div className={styles.controlGroup}>
               <Label htmlFor="forecast-variable">Variable</Label>
@@ -371,9 +479,9 @@ export default function App() {
                   setStepIndex(Number(data.value))
                 }
               />
-              <Caption1>
+              <CaptionNote>
                 {formatter.format(new Date(step.timestamp + "Z"))}
-              </Caption1>
+              </CaptionNote>
             </div>
           </div>
         </div>
@@ -386,7 +494,8 @@ export default function App() {
                 <Title3>{variableLabels[variable]}</Title3>
                 <div className={styles.mapStats}>
                   <Badge appearance="tint" size="large">
-                    Range: {range[0].toFixed(0)}–{range[1].toFixed(0)}{" "}
+                    Range: {formatRangeValue(variable, range[0])}–
+                    {formatRangeValue(variable, range[1])}{" "}
                     {valueUnits[variable]}
                   </Badge>
                   {summaryMetrics.map((metric, idx) => (
@@ -400,38 +509,44 @@ export default function App() {
           />
           <div className={styles.mapContainer}>
             <MapContainer
-              center={auroraForecast.region.center}
-              zoom={6}
-              scrollWheelZoom={false}
+              center={mapCenter}
+              bounds={norwayBounds}
+              zoom={5.25}
+              minZoom={4}
+              maxZoom={10}
+              zoomSnap={0.25}
+              zoomDelta={0.5}
+              maxBounds={norwayBounds}
+              maxBoundsViscosity={1.0}
+              worldCopyJump={false}
+              scrollWheelZoom={true}
+              preferCanvas
               style={{ height: "100%", width: "100%" }}
               attributionControl={false}
             >
-              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-              <HeatmapOverlay
-                data={(() => {
-                  const grid = convertToGrid(step, variable);
-                  console.log(
-                    `Rendering ${variable} at ${
-                      step.timestamp
-                    }: range ${Math.min(...grid.data.flat())}-${Math.max(
-                      ...grid.data.flat()
-                    )}`
-                  );
-                  return grid.data;
-                })()}
-                bounds={convertToGrid(step, variable).bounds}
-                colormap={variable === "temperature" ? "coolwarm" : "viridis"}
-                vmin={range[0]}
-                vmax={range[1]}
-                opacity={0.75}
+              <TileLayer
+                url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                noWrap
+                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>'
               />
+              {gridData && (
+                <HeatmapOverlay
+                  data={gridData.data}
+                  bounds={gridData.bounds}
+                  colormap={colormap}
+                  vmin={range[0]}
+                  vmax={range[1]}
+                  opacity={0.75}
+                  gamma={gamma}
+                />
+              )}
             </MapContainer>
             <div className={styles.legend}>
               <div className={styles.legendTitle}>
                 {variableLabels[variable]}
               </div>
               <div className={styles.legendScale}>
-                {getLegendStops(variable, range).map((stop, idx) => (
+                {legendStops.map((stop: LegendStop, idx: number) => (
                   <div key={idx} className={styles.legendItem}>
                     <div
                       className={styles.legendColor}

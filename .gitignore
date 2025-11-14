@@ -273,13 +273,3 @@ coverage/
 
 # user-installed starter code from innovation kits
 /aurora-finetune
-
-# ------------------------------------------------------------
-# Large Data Files
-# ------------------------------------------------------------
-
-# ERA5 weather data files (NetCDF and GRIB formats)
-# These should be downloaded using scripts in innovation-kit-repository/aurora/assets/scripts/
-era5-*.nc
-era5-*.grib
-era5-*.grib.*.idx

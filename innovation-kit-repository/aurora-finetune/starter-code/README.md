@@ -1,21 +1,15 @@
 # Vibe Tune Aurora Starter Code
 
-This package (`vibe_tune_aurora`) powers the Aurora Finetuning Innovation Kit. It provides a runnable PyTorch Lightning training stack, CLI wrappers, and sample data so assistants or developers can fine-tune Microsoft’s Aurora model with minimal setup.
+This package (`vibe_tune_aurora`) acts as a starter codebase as part of the Aurora Finetuning Innovation Kit. It provides a runnable PyTorch Lightning training stack, CLI wrappers, and sample data so assistants or developers can fine-tune Microsoft’s Aurora model with minimal setup.
 
 ## Quick start
 
-1. **Initialize the project (from the repository root):**
-   ```bash
-   uv run .vibe-kit/innovation-kits/aurora-finetune/initialization/initialize_starter_code.py
-   ```
-   This copies the starter code into place, syncs dependencies, and can run automated tests. Pass `--skip-tests` to speed up the copy step if desired.
-
-2. **Sync dependencies (if you skipped the initialization script’s sync step):**
+1. **Sync dependencies**
    ```bash
    uv sync
    ```
 
-3. **Run the bundled tests (optional but recommended):**
+2. **Run the bundled tests (optional but recommended):**
    ```bash
    uv run pytest -s
    ```
@@ -27,27 +21,28 @@ This package (`vibe_tune_aurora`) powers the Aurora Finetuning Innovation Kit. I
    ```
    This validates the optimizer step and checkpoint wiring in roughly one minute on CPU.
 
-4. **Launch a training run:**
+3. **Launch a training run:**
    ```bash
    uv run python -m vibe_tune_aurora.cli.train --help
    ```
    Configure datasets, variables, and hyperparameters via CLI arguments or config files (see `vibe_tune_aurora/config.py`).
 
-   For a quick CPU-only trial using the bundled ERA5 slice, run:
+   For a quick trial using the predownloaded ERA5 data slice, run:
    ```bash
    uv run python -m vibe_tune_aurora.cli.train \
      --pickle_file tests/inputs/era5_training_data_jan2025_1_to_7.pkl \
-     --loss_type 4_vars \
+     --loss_type 2t_var \
      --max_epochs 1
    ```
    This should complete in ~5 minutes on a laptop and confirms the fine-tuning loop end to end.
 
-5. **Evaluate a checkpoint:**
+4. **Evaluate a checkpoint:**
    ```bash
    uv run python -m vibe_tune_aurora.cli.evaluate --checkpoint path/to.ckpt
    ```
+   This displays statistics on the evaluation metrics.
 
-6. **Generate a quick-look visualization (optional):**
+5. **Generate a quick-look visualization (optional):**
    ```bash
    uv run python -m vibe_tune_aurora.cli.visualize \
      --checkpoint runs/EXPERIMENT/finetuning/version_0/checkpoints/last.ckpt \
@@ -57,38 +52,13 @@ This package (`vibe_tune_aurora`) powers the Aurora Finetuning Innovation Kit. I
    ```
    This renders prediction, target, and optional absolute-error panels for a chosen surface variable.
 
-Refer to `docs/aurora-finetuning-guide.md` for an end-to-end workflow and `docs/uv-getting-started-features.md` for a refresher on `uv` commands.
+## Fetching weather data from open-source APIs
+In order to fetch and download additional data, further setup is required.
 
-## Project layout
-
-```
-starter-code/
-├── pyproject.toml                # uv project manifest & dependencies
-├── uv.lock                       # Locked dependency versions
-├── src/vibe_tune_aurora/
-│   ├── aurora_module.py          # LightningModule wrapper for Aurora
-│   ├── training.py               # Training loop & optimizer utilities
-│   ├── evaluation.py             # Evaluation routines
-│   ├── model_init.py             # Checkpoint loading helpers
-│   ├── losses.py                 # Loss definitions
-│   ├── callbacks.py              # Training callbacks (checkpointing, logging)
-│   ├── config.py                 # Configuration primitives / CLI defaults
-│   ├── data_utils.py             # Data loaders, normalization helpers
-│   └── cli/
-│       ├── train.py              # CLI entry point for fine-tuning
-│       ├── evaluate.py           # CLI entry point for evaluation
-│       └── visualize.py          # CLI for prediction/target quick-look plots
-└── tests/
-    ├── inputs/                   # Sample ERA5 data and checkpoints
-    └── ...                       # Unit/integration tests
-```
-
-## Usage patterns
-
-- **New variable fine-tuning:** Edit `config.py` or pass CLI flags to add surface, static, or atmospheric variables. Pair with normalization updates in `data/default_stats.py`.
-- **Custom datasets:** Replace or augment files under `tests/inputs/` and update the data loader paths in `data_utils.py`.
-- **Advanced training tweaks:** Modify callbacks, optimizers, or schedulers in `callbacks.py` and `training.py`. Use `docs/finetuning.md` for guidance on AMP, gradient checkpointing, and `stabilise_level_agg`.
-- **Visualization & reporting:** Extend `evaluation.py` or create new scripts under `cli/` to generate plots or JSON scorecards.
+For ERA5 data:
+1. Create a free  account at https://cds.climate.copernicus.eu/.
+2. Accept the terms of use for the datasets you plan to download. An example dataset name is: "ERA5 hourly data on single levels from 1940 to present".
+3. In the project roo directory, create a `.env` file (if not already done), and set your API key to the `CDS_API_KEY` env variable. You should be able to find your API key from the CDS website.
 
 ## Related documentation
 
@@ -98,11 +68,10 @@ starter-code/
 - `docs/beware.md` — Known pitfalls and mitigation strategies.
 - `docs/uv-getting-started-features.md` — `uv` package manager cheat sheet.
 
-## Example assistant flows
+## Climate Data Store - data attribution
+For testing and sample data purposes, we include ERA5 weather data in the starter-code repository, which was directly downloaded from the Copernicus Climate Data Store (https://cds.climate.copernicus.eu/).
+Specifically, we fetched from the following datasets:
+- ERA5 hourly data on single levels from 1940 to present (DOI: 10.24381/cds.adbb2d47)
+- ERA5 hourly data on pressure levels from 1940 to present (DOI: 10.24381/cds.bd0915c6)
 
-The kit is designed so an AI assistant (or human developer) can complete tasks like:
-
-1. **Fine-tune on a new variable (e.g., UVB radiation)** for Jan–Mar 2025 data limited to the northwest quadrant, evaluate on April 2025, and output metrics as JSON.
-2. **Generate a 10-step rollout visualization** for surface wind velocity starting 1 May using the fine-tuned checkpoint, returning an HTML plot.
-
-Feel free to script additional scenarios under `cli/` or as notebooks (see `.vibe-kit/innovation-kits/aurora-finetune/docs/` for guidance).
+These datasets are free to distribute via the Creative Commons BY license: https://creativecommons.org/licenses/by/4.0/

@@ -16,6 +16,8 @@ dependencies = [
     "torch>=2.7.0",
     "xarray>=2024.1.0",
     "netcdf4>=1.6.0",
+    "cdsapi>=0.7.7",
+    "python-dotenv>=1.2.1",
 ]
 
 [build-system]
@@ -29,4 +31,9 @@ packages = ["src/vibe_tune_aurora"]
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "requires_cds_api_key: marks tests that call the CDS API (select with 'pytest -m requires_cds_api_key')",
 ]

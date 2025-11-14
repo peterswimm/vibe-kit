@@ -2,9 +2,13 @@
 
 **Start here if you want to understand Aurora fundamentals and build your own application from the ground up.**
 
+> **Kit alignment checklist:**
+> - Sample data installs under `.vibe-kit/innovation-kits/aurora/assets/norway-example/data/` (mirrored from `innovation-kit-repository/aurora/assets/norway-example/data/`) and covers the 64x112 grid. Update file paths before sharing snippets or scripts.
+> - If someone needs a hosted endpoint, the "Deployments" section includes a short note on reusing these scripts with Azure AI Foundry.
+> - For fine-tuning or custom model variants, route them to the [Aurora Fine-tuning Innovation Kit](../../aurora-finetune/) rather than extending this quick-start.
 > **Which guide should I use?**
 > - **This guide (From Scratch):** You want to learn Aurora's core concepts—data requirements, batch construction, inference patterns—and build your own application without starting from an existing example.
-> - **[prototyping-guide.md](prototyping-guide.md) (Customization):** You've run the Norway example and want to adapt it for your region. Start with working code and modify incrementally.
+- **[expand-norway-example.md](expand-norway-example.md) (Customization):** You've run the Norway example and want to adapt it for your region. Start with working code and modify incrementally.
 
 > **When to fine-tune Aurora:**
 > This guide uses the **pretrained base Aurora model** with your own ERA5 data for inference. The base model works well for general weather forecasting.
@@ -20,9 +24,8 @@
 
 ## Overview
 
-> **Execution reminder:** All code paths in this guide run locally with the bundled checkpoint and ERA5 tiles. 
-> When you are ready to offload inference to Azure AI Foundry, export the four `AZURE_AURORA_*` environment variables 
-> (documented in `PROTOTYPE-DOCUMENTATION.md`) and the same scripts will call your hosted deployment while falling back to local mode on errors.
+> **Execution reminder:** All code paths in this guide run locally with the bundled checkpoint and ERA5 tiles.
+> When you're ready to offload inference to Azure AI Foundry, export the four `AZURE_AURORA_*` environment variables so the scripts can reach your hosted deployment while falling back to local mode if the service is unavailable.
 
 This guide walks through building a complete Aurora prototype from scratch. 
 Follow these steps to adapt it to your domain.
@@ -76,8 +79,8 @@ Before building a prototype, you need **Aurora-compatible data**. Use these offi
 
 3. **Validation: Inspect Your Downloaded Data**  
    ```bash
-   # After downloading, check compatibility
-   python scripts/inspect_data.py --data-path ./your_data_folder
+    # After downloading, check compatibility
+    python .vibe-kit/innovation-kits/aurora/assets/scripts/check_aurora_dataset.py --data-dir ./your_data_folder
    ```
    This will show:
    - Available variables (u10, v10, t2m, msl, etc.)
@@ -149,9 +152,11 @@ level / pressure_level → Atmospheric pressure levels (hPa) if using atmospheri
 ### Step 1.2: Inspect Your Data
 
 ```bash
-# Use the inspection script
-python scripts/inspect_data.py
+# Use the inspection script bundled with the kit
+python .vibe-kit/innovation-kits/aurora/assets/scripts/check_aurora_dataset.py --data-dir ./your_data_folder
 ```
+
+If you are browsing the repository source directly, the same helper lives at `innovation-kit-repository/aurora/assets/scripts/check_aurora_dataset.py`.
 
 This will:
 1. List all `.nc` files in your data directory
@@ -344,87 +349,43 @@ print(f"U10 mean: {u10_pred.mean().item():.2f} m/s")
 with torch.inference_mode():
     forecasts = [pred.to("cpu") for pred in rollout(model, batch, steps=4)]
 
-# Extract wind speeds from each step
-wind_speeds = []
-for i, pred in enumerate(forecasts):
-    u10 = pred.surf_vars["u10"][0, 0].numpy()  # [lat, lon]
-    v10 = pred.surf_vars["v10"][0, 0].numpy()
-    
-    wind_speed = np.sqrt(u10**2 + v10**2).mean()  # Spatial mean
-    wind_speeds.append(wind_speed)
-    print(f"Step {i+1}: {wind_speed:.2f} m/s")
-
-wind_speeds = np.array(wind_speeds)
+print(f"Produced {len(forecasts)} forecast steps")
 ```
 
 ---
 
-## Phase 4: Apply Domain Logic
+## Phase 4: Summarize Forecast Outputs
 
-### Step 4.1: Extract & Transform Data
-
-For operational forecasting:
+Aurora forecasts produce full spatial grids. Summarize them into the metrics your application needs (energy yield, heat index, flooding risk, etc.).
 
 ```python
-def extract_weather_features(forecasts):
-    """Extract wind speed and direction from Aurora predictions."""
-    
-    results = []
-    
+def summarize_forecast(forecasts):
+    """Convert Aurora outputs into lightweight aggregates."""
+
+    entries = []
+
     for step_idx, pred in enumerate(forecasts):
-        # Extract 10-meter wind
-        u10 = pred.surf_vars["u10"][0, 0].numpy()  # (lat, lon)
+        # Example metrics: wind magnitude and 2m temperature
+        u10 = pred.surf_vars["u10"][0, 0].numpy()
         v10 = pred.surf_vars["v10"][0, 0].numpy()
-        
-        # Compute wind speed and direction
+        t2m = pred.surf_vars["t2m"][0, 0].numpy()
+
         wind_speed = np.sqrt(u10**2 + v10**2)
-        wind_direction = np.arctan2(v10, u10) * 180 / np.pi  # degrees
-        
-        # Farm-level statistics (spatial mean)
-        ws_mean = wind_speed.mean()
-        wd_mean = wind_direction.mean()
-        
-        results.append({
-            'step': step_idx + 1,
-            'wind_speed_ms': ws_mean,
-            'wind_direction_deg': wd_mean,
-            'wind_speed_field': wind_speed,  # Full grid for spatial analysis
-            'wind_direction_field': wind_direction,
+
+        entries.append({
+            "lead_time_hours": (step_idx + 1) * 6,
+            "wind_speed_mean": float(wind_speed.mean()),
+            "wind_speed_max": float(wind_speed.max()),
+            "temperature_mean": float(t2m.mean()),
         })
-    
-    return results
+
+    return entries
+
+
+results = summarize_forecast(forecasts)
 ```
 
-### Step 4.2: Apply Power Curve & Control Logic
-
-```python
-def apply_turbine_control(wind_speed):
-    """Siemens 5MW power curve + blade pitch control."""
-    
-    power_kw = np.zeros_like(wind_speed, dtype=np.float32)
-    
-    # Region I: Cut-in (3 m/s)
-    mask_i = (wind_speed >= 3.0) & (wind_speed < 5.0)
-    power_kw[mask_i] = ((wind_speed[mask_i] - 3.0) / 2.0) ** 2 * 1000.0
-    
-    # Region II: Aerodynamic (5–13 m/s)
-    mask_ii = (wind_speed >= 5.0) & (wind_speed < 13.0)
-    power_kw[mask_ii] = (wind_speed[mask_ii] ** 3 / 13.0 ** 3) * 4500.0
-    
-    # Region III: Pitch-controlled (13–25 m/s)
-    mask_iii = (wind_speed >= 13.0) & (wind_speed < 25.0)
-    power_kw[mask_iii] = 5000.0
-    
-    # Blade pitch
-    pitch_deg = np.zeros_like(wind_speed)
-    pitch_deg[mask_i | mask_ii] = 0.0  # Optimal for aerodynamic
-    pitch_deg[mask_iii] = (wind_speed[mask_iii] - 13.0) / (25.0 - 13.0) * 27.0
-    pitch_deg[wind_speed >= 25.0] = 90.0  # Feathered (cut-out)
-    
-    return power_kw, pitch_deg
-```
-
-> **Grid-safe vs target power:** Pair the raw `power_kw` output with a ramp limiter (`apply_power_ramp_limit`) so the turbine eases toward the target setpoint. In the energy prototype this cap is `MAX_RAMP_RATE_KW_PER_MIN × 360 min` (ERA5’s 6‑hour step), producing the `power_limited_kw` values surfaced in dashboards and CSV exports.
+> Adapt the aggregation logic for your domain—e.g., compute relative humidity, derive flood indices, or feed the grid into downstream ML models.
 
 ---
 
@@ -436,12 +397,7 @@ def apply_turbine_control(wind_speed):
 import pandas as pd
 from datetime import datetime
 
-results_df = pd.DataFrame({
-    'lead_time_min': [15, 30, 45, 60],
-    'wind_speed_ms': wind_speeds,
-    'power_kw': power_output,
-    'pitch_deg': pitch_angles,
-})
+results_df = pd.DataFrame(results)
 
 # Save
 output_file = f"forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -455,21 +411,17 @@ print(results_df)
 ```python
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(3, 1, figsize=(10, 9))
+fig, axes = plt.subplots(2, 1, figsize=(10, 7))
 
 # Wind speed
-axes[0].plot(results_df['lead_time_min'], results_df['wind_speed_ms'], 'o-')
+axes[0].plot(results_df['lead_time_hours'], results_df['wind_speed_mean'], 'o-')
 axes[0].set_ylabel('Wind Speed (m/s)')
-axes[0].set_title('Aurora Forecast')
+axes[0].set_title('Aurora Forecast Summary')
 
-# Power
-axes[1].plot(results_df['lead_time_min'], results_df['power_kw'], 'o-')
-axes[1].set_ylabel('Power (kW)')
-
-# Pitch
-axes[2].plot(results_df['lead_time_min'], results_df['pitch_deg'], 'o-')
-axes[2].set_ylabel('Blade Pitch (°)')
-axes[2].set_xlabel('Lead Time (min)')
+# Temperature
+axes[1].plot(results_df['lead_time_hours'], results_df['temperature_mean'], 'o-')
+axes[1].set_ylabel('2m Temperature (K)')
+axes[1].set_xlabel('Lead Time (hours)')
 
 plt.tight_layout()
 plt.savefig('aurora_forecast.png', dpi=150)
@@ -498,7 +450,7 @@ For production deployment patterns, see:
 
 ### Issue: Data variables not found
 **Solution**:
-- Run `python scripts/inspect_data.py` to check variable names
+- Run `python .vibe-kit/innovation-kits/aurora/assets/scripts/check_aurora_dataset.py` to check variable names
 - Verify your data has required variables (u10, v10, t2m, msl)
 - Use dummy tensors if variables are missing
 
@@ -579,6 +531,3 @@ if __name__ == "__main__":
 3. ✅ Run Aurora forecast on your domain
 4. ✅ Apply your domain-specific logic
 5. ✅ Validate forecast accuracy
-6. ✅ Deploy to production
-
-Questions? Open an issue on [GitHub](https://github.com/microsoft/aurora/issues).

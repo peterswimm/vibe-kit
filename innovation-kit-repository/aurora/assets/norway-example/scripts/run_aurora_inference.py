@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -16,19 +16,22 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SPATIAL_PATCH_SIZE = 16  # Aurora requirement - dimensions must be divisible by 16
 
 
-def load_era5_input(surf_path: Path, atmos_path: Path) -> Batch:
+def load_era5_input(surf_path: Path, atmos_path: Path, static_path: Path) -> Batch:
     """Load last 2 timesteps from ERA5 files as Aurora input."""
 
-    print(f"Loading surface + static variables from: {surf_path.name}")
+    print(f"Loading surface variables from: {surf_path.name}")
     ds_surf = xr.open_dataset(surf_path)
 
     print(f"Loading atmospheric variables from: {atmos_path.name}")
     ds_atmos = xr.open_dataset(atmos_path)
 
+    print(f"Loading static variables from: {static_path.name}")
+    ds_static = xr.open_dataset(static_path)
+
     # Get last 2 timesteps (indices -2, -1)
     time_indices = slice(-2, None)
 
-    print(f"\nUsing timesteps:")
+    print("\nUsing timesteps:")
     print(f"  {ds_surf['valid_time'].isel(valid_time=-2).values}")
     print(f"  {ds_surf['valid_time'].isel(valid_time=-1).values}")
 
@@ -48,11 +51,11 @@ def load_era5_input(surf_path: Path, atmos_path: Path) -> Batch:
         surf_vars[key] = torch.from_numpy(data)
         print(f"  {key}: {surf_vars[key].shape}")
 
-    # Extract STATIC variables (File 1) - no time dimension
+    # Extract STATIC variables (separate file) - no time dimension
     print("\nExtracting static variables...")
     static_vars = {}
     for key, var_name in [("lsm", "lsm"), ("z", "z"), ("slt", "slt")]:
-        data = ds_surf[var_name].values.astype(np.float32)
+        data = ds_static[var_name].values.astype(np.float32)
         # Remove any extra dimensions
         if data.ndim == 3:
             data = data[0, :, :]  # Take first time/batch if present
@@ -128,6 +131,8 @@ def load_era5_input(surf_path: Path, atmos_path: Path) -> Batch:
 def run_forecast(input_batch: Batch, num_steps: int = 8) -> list[Batch]:
     """Run Aurora rollout for num_steps (28 = 7 days at 6hr intervals)."""
     print(f"\nLoading Aurora model on {DEVICE}...")
+    print("Preparing model weights; the first run may download them from Hugging Face.")
+    sys.stdout.flush()
     model = Aurora(use_lora=False)  # Pretrained version without LoRA
     model.load_checkpoint("microsoft/aurora", "aurora-0.25-pretrained.ckpt")
     model.eval()
@@ -157,9 +162,11 @@ def save_forecast_netcdf(
     # DEBUG: Check actual shape of predictions
     if predictions:
         first_shape = predictions[0].surf_vars["2t"].shape
+        lat_dim, lon_dim = first_shape[-2], first_shape[-1]
         print(f"DEBUG: First prediction shape for '2t': {first_shape}")
         print(
-            f"DEBUG: Expected shape: (batch=1, time=2, lat=48, lon=48) [61x61 cropped to 48x48 for patch_size=16]"
+            "DEBUG: Expected shape: (batch=1, time=1, "
+            f"lat={lat_dim}, lon={lon_dim}) [cropped to multiples of {SPATIAL_PATCH_SIZE}]"
         )
 
     # Stack predictions along time dimension
@@ -171,8 +178,12 @@ def save_forecast_netcdf(
     t2m_list = [pred.surf_vars["2t"][0, 0].cpu().numpy() for pred in predictions]
     msl_list = [pred.surf_vars["msl"][0, 0].cpu().numpy() for pred in predictions]
 
-    print(f"DEBUG: Extracted array shape: {t2m_list[0].shape}")
-    print(f"DEBUG: Expected: (lat=48, lon=48)")
+    lat_dim, lon_dim = t2m_list[0].shape
+    print(f"DEBUG: Extracted array shape: (lat={lat_dim}, lon={lon_dim})")
+    print(
+        "DEBUG: Expected lat/lon dimensions derive from ERA5 input: "
+        f"{lat_dim}×{lon_dim}"
+    )
     print(
         f"DEBUG: Sample values: min={t2m_list[0].min():.2f}, max={t2m_list[0].max():.2f}, mean={t2m_list[0].mean():.2f}"
     )
@@ -232,23 +243,35 @@ def save_forecast_netcdf(
 
 
 if __name__ == "__main__":
-    # Input files
-    surf_nc = Path("data/4d2238a45558de23ef37ca2e27a0315.nc")
-    atmos_nc = Path("data/4a1f46cd2447ab83c1f564af59d53023.nc")
-    output_nc = Path("data/aurora_forecast_june8.nc")
+    import sys
+
+    # Parse command-line arguments or use defaults
+    if len(sys.argv) >= 9 and sys.argv[1] == "--surf":
+        surf_nc = Path(sys.argv[2])
+        atmos_nc = Path(sys.argv[4])  # after --atmos
+        static_nc = Path(sys.argv[6])  # after --static
+        output_nc = Path(sys.argv[8])  # after --output
+    else:
+        # Default paths (Norway example bundled data)
+        surf_nc = Path("data/norway_surface.nc")
+        atmos_nc = Path("data/norway_atmospheric.nc")
+        static_nc = Path("data/norway_static.nc")
+        output_nc = Path("data/norway_june8_forecast.nc")
 
     print("=" * 70)
     print("Aurora Inference: Norway Regional Forecast")
     print("=" * 70)
     print(f"\nDevice: {DEVICE}")
+    print("\nHang tight -- initializing Aurora dependencies. The first progress update can take 20-30 seconds.")
+    sys.stdout.flush()
 
     # Load input data
     print("\n" + "=" * 70)
     print("PHASE 1: Loading ERA5 Input Data")
     print("=" * 70)
-    batch = load_era5_input(surf_nc, atmos_nc)
+    batch = load_era5_input(surf_nc, atmos_nc, static_nc)
 
-    print(f"\n✓ Input batch prepared:")
+    print("\n✓ Input batch prepared:")
     print(f"  Surface vars: {batch.surf_vars['2t'].shape}")
     print(f"  Atmospheric vars: {batch.atmos_vars['t'].shape}")
     print(f"  Grid: {len(batch.metadata.lat)}×{len(batch.metadata.lon)}")

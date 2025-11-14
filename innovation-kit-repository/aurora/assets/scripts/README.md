@@ -7,6 +7,7 @@ Standalone tools for working with Aurora beyond the Norway example.
 - **quick_verify_netcdf.py** - Fast file inspection (no dependencies)
 - **check_aurora_dataset.py** - Validate NetCDF has required Aurora variables
 - **download_era5_subset.py** - Automate CDS API downloads for custom regions
+- **validate_grid.py** - Confirm your latitude/longitude bounds align with Aurora's 16×16 patch requirement
 
 ## When to Use These
 
@@ -47,18 +48,27 @@ python download_era5_subset.py \
 
 **Prerequisites:**
 1. Install `cdsapi`: `pip install cdsapi`
-2. Create account at https://cds.climate.copernicus.eu/
-3. Configure API key in `~/.cdsapirc`
+2. Create an account at https://cds.climate.copernicus.eu/ and accept dataset terms.
+3. Set credentials in your environment (recommended):
+    ```bash
+    # .env or shell profile
+    CDS_API_KEY="<UID>:<API_KEY>"
+    # Optional override if you mirror the endpoint
+    # CDS_API_URL="https://cds.climate.copernicus.eu/api"
+    ```
+    Existing `~/.cdsapirc` files continue to work, but they are no longer required.
 
-See also: [data-integration.md](../../docs/data-integration.md) for complete CDS setup guide.
-3. Accept dataset terms of use
-4. Add API key to `~/.cdsapirc`:
-   ```
-   url: https://cds.climate.copernicus.eu/api
-   key: <UID>:<API_KEY>
-   ```
+See also: [data-integration.md](../../docs/data-integration.md) for the full CDS setup guide.
 
 For atmospheric data, switch to `reanalysis-era5-pressure-levels` and add `--levels` argument.
+
+### Validate Grid Bounds
+
+```bash
+python validate_grid.py --lat-min 36.0 --lat-max 48.0 --lon-min 0.0 --lon-max 12.0
+```
+
+Shows the total grid cells, Aurora patch layout, and suggested adjustments when a dimension is not divisible by 16. Use this before downloading new data to avoid reshaping issues.
 
 ## See Also
 

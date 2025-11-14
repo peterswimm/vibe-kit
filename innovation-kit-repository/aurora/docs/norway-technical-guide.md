@@ -1,19 +1,19 @@
 # Norway Technical Guide: Aurora Inference Deep Dive
 
-**Understand how Aurora generates 24-hour weather forecasts for Norway's coastal region.**
+**Understand how Aurora generates 24-hour forecasts for mainland Norway.**
 
-This technical guide explains Aurora's architecture, data requirements, and inference mechanics using the Norway example. After reading, you'll understand every line of `run_aurora_inference.py` and why design decisions were made.
+This guide unpacks the 64×112 Norway demo: data requirements, model expectations, script architecture, and validation workflows. Read it after [quick-start.md](quick-start.md) to understand every decision embedded in `run_aurora_inference.py`.
 
 ---
 
 ## Overview
 
 **What this guide covers:**
-- Aurora's input/output requirements (why 2 timesteps, why 48×48 grid)
+- Aurora's input/output requirements (why 2 timesteps, why 64×112 grid)
 - Script architecture (`run_aurora_inference.py` internals)
 - Model mechanics (patch encoder, rollout loop, autoregressive prediction)
-- Stability analysis (why 24h works, why 7 days diverges)
-- NetCDF structure and variable mappings
+- Stability analysis (why 24 h works, what fails beyond)
+- NetCDF structure, variable mapping, and TypeScript conversion
 
 **Prerequisites:** Complete [quick-start.md](quick-start.md) first to have working example.
 
@@ -25,22 +25,22 @@ This technical guide explains Aurora's architecture, data requirements, and infe
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| **Model variant** | AuroraSmall | 1.3B parameters, 5.03GB checkpoint |
-| **Patch size** | 16×16 cells | Grid dimensions MUST be divisible by 16 |
-| **Input timesteps** | 2 consecutive | 6 hours apart (e.g., 12:00 + 18:00) |
-| **Output per step** | 1 timestep | 6 hours ahead of last input |
-| **Autoregressive** | Yes | Output becomes input for next step |
-| **Training data** | Global ERA5 | 1979-2023, 0.25° resolution |
+| **Model variant** | `Aurora` (pretrained 0.25° checkpoint) | 1.3 B parameters, ~5 GB weight file |
+| **Patch size** | 16×16 cells | Height/width must be multiples of 16 |
+| **Input timesteps** | Two consecutive | 6 h apart (e.g., 12 UTC & 18 UTC) |
+| **Output per rollout step** | One timestep | 6 h ahead of last input |
+| **Autoregressive** | Yes | Output is appended and fed back in |
+| **Training data** | ERA5 global reanalysis | 1979–2023, 0.25° grid |
 
-### Norway Example Configuration
+### Norway Configuration
 
 | Parameter | Value |
 |-----------|-------|
-| **Grid size** | 48×48 cells (2,304 points) |
-| **Resolution** | 0.25° (~28km at 60°N) |
-| **Coverage** | 58.25-70°N, 5-16.75°E |
-| **Forecast steps** | 4 (24 hours: 00:00, 06:00, 12:00, 18:00 on June 8) |
-| **Input data** | June 7 at 12:00 and 18:00 (CDS ERA5) |
+| **Grid size** | 64 latitudes × 112 longitudes (7,168 points) |
+| **Resolution** | 0.25° (~28 km at 60° N) |
+| **Geographic extent** | 57.0° N–72.75° N, 4.0° E–31.75° E |
+| **Forecast steps** | 4 (June 8 00/06/12/18 UTC) |
+| **Input timesteps** | June 7 at 12 UTC and 18 UTC (ERA5) |
 
 ---
 
@@ -48,29 +48,29 @@ This technical guide explains Aurora's architecture, data requirements, and infe
 
 ### Atmospheric State vs Trends
 
-Aurora requires **2 consecutive timesteps exactly 6 hours apart** to capture:
+Aurora requires **two consecutive timesteps exactly six hours apart** to capture:
 
-**Timestep 1 (T-6h, e.g., June 7 12:00):**
+**Timestep 1 (T−6 h, e.g., June 7 12:00):**
 - Temperature distribution
 - Pressure field
 - Wind field
 - Humidity profile
 
-**Timestep 2 (T, e.g., June 7 18:00):**
+**Timestep 2 (T, e.g., June 7 18:00):**
 - Same variables, 6 hours later
 
-**Derived information (T2 - T1):**
+**Derived information (T₂ − T₁):**
 - **Wind acceleration:** Is the jet stream strengthening or weakening?
 - **Temperature trends:** Heating or cooling? How fast?
 - **Pressure tendencies:** Rising (fair weather) or falling (storm approaching)?
 - **Moisture flux:** Convergence (precipitation forming) or divergence?
 
-**Analogy:** Predicting where a car will be in 1 hour requires:
+**Analogy:** Predicting where a car will be in one hour requires:
 1. Current position (Timestep 2)
 2. Velocity (difference between Timestep 2 and Timestep 1)
 
-One timestep = position only → Can't predict motion  
-Two timesteps = position + velocity → Can extrapolate trajectory
+One timestep ⇒ position only → You cannot infer motion.  
+Two timesteps ⇒ position + velocity → You can extrapolate trajectory.
 
 ### Common Misconception
 
@@ -79,97 +79,64 @@ Two timesteps = position + velocity → Can extrapolate trajectory
 
 ---
 
-## 3. Grid Constraints: Why 48×48?
+## 3. Grid Constraints & Why 64×112 Works
 
 ### Patch Size Requirement
 
-Aurora's encoder divides the grid into **16×16 patches**:
+Aurora tokenizes the planet into **16×16 spatial patches**. Any regional subset must therefore have heights and widths that divide cleanly by 16.
 
 ```
-Input grid: 48×48 cells
-↓
-Divided into: (48÷16) × (48÷16) = 3×3 = 9 patches
-↓
-Each patch: 16×16 = 256 cells processed together
+Input grid: 64 × 112 cells
+           ↓
+Patches:   (64 ÷ 16) × (112 ÷ 16) = 4 × 7 = 28 patches
+           ↓
+Each patch: 16 × 16 cells processed together
 ```
 
-**Critical constraint:** Grid dimensions MUST be divisible by 16.
+**Rule of thumb:** `lat_cells % 16 == 0` and `lon_cells % 16 == 0` or Aurora throws `ValueError: grid dimensions must be divisible by 16`.
 
-**Valid grid sizes:**
-- 48×48 (3×3 patches) - Small regional, used in Norway example
-- 64×64 (4×4 patches) - Medium regional
-- 80×80 (5×5 patches) - Larger regions, better boundary conditions
-- 128×128 (8×8 patches) - Very large regional or small continental
+### Choosing a Domain Size
 
-**Invalid sizes cause errors:**
-- 50×50 → `ValueError: Grid dimensions must be divisible by 16`
-- 60×60 → Same error
-- 45×45 → Same error
+| Grid (lat × lon) | Points | Patches | Typical use |
+|------------------|--------|---------|-------------|
+| 32 × 32 | 1,024 | 4 | Toy experimentation only |
+| 48 × 48 | 2,304 | 9 | Fast regional demo, limited coverage |
+| **64 × 112** | **7,168** | **28** | **Full mainland Norway (current demo)** |
+| 80 × 128 | 10,240 | 40 | Regional + buffer zone |
+| 128 × 256 | 32,768 | 128 | Continental / global slices |
 
-### Why Not Larger Grids?
-
-**Trade-offs:**
-
-| Grid Size | Points | Patches | Pros | Cons |
-|-----------|--------|---------|------|------|
-| **48×48** | 2,304 | 9 | Fast inference (5-10 min) | Limited boundary context |
-| **64×64** | 4,096 | 16 | Better boundaries | Slower (8-15 min) |
-| **80×80** | 6,400 | 25 | Good boundaries, stable | Much slower (15-25 min) |
-| **128×128** | 16,384 | 64 | Excellent boundaries | Very slow (30-60 min), high VRAM |
-
-**Norway example uses 48×48** for:
-- Fast prototyping (5-10 min on GPU)
-- Easy local development (works on laptops)
-- Still demonstrates Aurora's capabilities
-
-**Production systems** might use 64×64 or 80×80 for better accuracy.
+We selected **64 × 112** because it:
+- Captures the full Norwegian mainland while keeping inference time manageable.
+- Preserves coastlines and fjords that were clipped in smaller grids.
+- Provides better boundary context than the older coastal subset without requiring cloud-scale hardware.
 
 ---
 
-## 4. Why Only 24-Hour Forecasts?
+## 4. Why Stop at 24 Hours?
 
-### Model Stability Analysis
+### Stability Checkpoints
 
-Aurora was trained on **global grids** with boundary conditions from all sides. On **small regional grids** (48×48), predictions diverge after 24-48 hours.
+Aurora excels on global domains because surrounding cells provide natural boundary conditions. Regional cut-outs—64 × 112 included—lack that context, so autoregressive errors grow over time.
 
-**Tested forecast horizons:**
+| Steps | Hours | Result | Typical 2 m temp range | Notes |
+|-------|-------|--------|------------------------|-------|
+| **4** | **24 h** | ✅ Stable | −5 °C to 18 °C | Smooth evolution, used in demo |
+| 8 | 48 h | ⚠️ Watch | −8 °C to 22 °C | Minor ringing near edges |
+| 16 | 96 h | ❌ Diverges | below −40 °C / above 40 °C | Boundary artifacts dominate |
+| 28 | 168 h | ❌ Fails | Unphysical extremes | Vertical striping, energy blow-up |
 
-| Steps | Hours | Result | Temp Range | Notes |
-|-------|-------|--------|------------|-------|
-| **4** | **24h** | ✅ **Stable** | 0-15°C | Realistic, smooth evolution |
-| 8 | 48h | ⚠️ Marginal | -5 to 20°C | Some boundary artifacts |
-| 16 | 96h | ❌ Diverged | -30 to 50°C | Unrealistic extremes |
-| 28 | 168h (7d) | ❌ Badly diverged | -100 to 228°C | Vertical striping, model breakdown |
+### What Breaks
 
-### Why Divergence Happens
+1. **Boundary shortages** – With only a few cells buffering the coastline, the model must invent inflow/outflow conditions.
+2. **Error compounding** – Each 6 h step feeds slightly worse inputs back into the loop.
+3. **Energy imbalance** – Without global constraints the latent dynamics drift.
+4. **Feedback loops** – Once a hot/cold streak forms at the edge, later steps amplify it.
 
-**Problem:** Small regional grids lack surrounding atmospheric context.
+### Extending Responsibly
 
-**Global forecast (Aurora's training data):**
-```
-[Ocean] → [Europe] → [Asia]
-   ↓         ↓         ↓
-Full atmospheric circulation context
-```
-
-**Regional forecast (Norway 48×48):**
-```
-[???] → [Norway] → [???]
-          ↓
-Limited context, artificial boundaries
-```
-
-**What goes wrong:**
-1. **Boundary errors:** Aurora extrapolates from edges without knowing what's beyond
-2. **Error accumulation:** Each 6-hour step compounds boundary artifacts
-3. **Atmospheric imbalance:** Energy/momentum conservation breaks down at edges
-4. **Feedback loops:** Small errors amplify through autoregressive prediction
-
-**Solutions for longer forecasts:**
-- **Larger grids** (64×64, 80×80) - More boundary buffer
-- **Boundary relaxation** - Blend with global forecast at edges (not implemented in example)
-- **Ensemble methods** - Run multiple forecasts, average results
-- **Hybrid approach** - Aurora for first 24h, traditional NWP for days 2-7
+- Increase domain size (e.g., 80 × 128) so inflow boundaries sit farther offshore.
+- Blend with a coarse global forecast every few steps (boundary relaxation).
+- Run short Aurora segments (24–36 h), then hand off to a physics model for longer horizons.
 
 ---
 
@@ -177,470 +144,323 @@ Limited context, artificial boundaries
 
 ### High-Level Flow
 
-```python
-1. Load Aurora model checkpoint (5.03 GB)
-2. Load 2 input timesteps from NetCDF files
-3. Convert to Aurora's Batch format
-4. Run rollout loop (4 iterations):
-   a. Model predicts next 6-hour state
-   b. Extract prediction [0,0] (first timestep of first batch)
-   c. Append to output
-   d. Use last 2 states as input for next iteration
-5. Save predictions to NetCDF
-```
+1. Parse CLI overrides (defaults point to norway_surface/atmospheric/static.nc)
+2. Load two ERA5 timesteps (June 7 12 UTC & 18 UTC) and crop to 64 × 112
+3. Build an Aurora `Batch` containing surface, atmospheric, and static tensors
+4. Instantiate the pretrained Aurora model and rollout four autoregressive steps
+5. Write the predictions to `data/norway_june8_forecast.nc`
 
-### Key Functions
+The code is split into three helpers plus a CLI wrapper:
 
-#### `load_aurora_model(device='cuda')`
+| Function | Responsibility |
+|----------|----------------|
+| `load_era5_input()` | Open NetCDF, enforce patch-compatible cropping, build the `Batch` object |
+| `run_forecast()` | Load the model, execute the rollout, return a list of predicted `Batch` objects |
+| `save_forecast_netcdf()` | Extract numpy arrays, assemble an `xarray.Dataset`, and write NetCDF |
 
-```python
-def load_aurora_model(device='cuda'):
-    """Load Aurora model from HuggingFace."""
-    model = AuroraSmall()
-    checkpoint = torch.hub.load_state_dict_from_url(
-        "https://huggingface.co/microsoft/aurora/resolve/main/aurora-0.25-small-pretrained.ckpt",
-        map_location=device
-    )
-    model.load_state_dict(checkpoint)
-    model.eval()
-    return model.to(device)
-```
+### Loading ERA5 (`load_era5_input`)
 
-**What happens:**
-1. Initialize AuroraSmall architecture (1.3B parameters)
-2. Download checkpoint from HuggingFace (5.03GB, cached locally)
-3. Load weights into model
-4. Set to evaluation mode (disable dropout, batch norm)
-5. Move to GPU or CPU
+Key operations:
 
-**First run:** Downloads checkpoint (~10 min on slow connection)  
-**Subsequent runs:** Loads from cache (`~/.cache/huggingface/`)
+1. **File I/O** – Opens `norway_surface.nc`, `norway_atmospheric.nc`, `norway_static.nc` with `xarray`. The files already contain the full 64 × 112 domain, so only minimal cropping is needed to enforce multiples of 16.
+2. **Variable mapping** – Surface variables (`10u`, `10v`, `2t`, `msl`) become `torch.Tensor` batches shaped `[1, 2, 64, 112]`. Atmospheric tensors include the four pressure levels and end up `[1, 2, 4, 64, 112]`. Static tensors drop singleton dimensions to `[64, 112]`.
+3. **Metadata** – Latitude/longitude arrays and the second timestamp (18 UTC) are packaged into Aurora's `Metadata` class so downstream code knows the grid.
 
-#### `load_era5_input(surf_file, atmos_file, start_time, grid_bounds)`
+### Rollout (`run_forecast`)
 
 ```python
-def load_era5_input(surf_file, atmos_file, start_time, grid_bounds):
-    """Load 2 consecutive timesteps from CDS ERA5 data."""
-    # Read NetCDF files
-    surf_ds = xr.open_dataset(surf_file)
-    atmos_ds = xr.open_dataset(atmos_file)
-    
-    # Extract spatial subset
-    lat_slice = slice(grid_bounds['lat_max'], grid_bounds['lat_min'])
-    lon_slice = slice(grid_bounds['lon_min'], grid_bounds['lon_max'])
-    
-    # Get 2 consecutive timesteps (6 hours apart)
-    time1 = start_time
-    time2 = start_time + timedelta(hours=6)
-    
-    # Extract variables at both times
-    batch = create_aurora_batch(surf_ds, atmos_ds, [time1, time2], 
-                                  lat_slice, lon_slice)
-    return batch
+model = Aurora(use_lora=False)
+model.load_checkpoint("microsoft/aurora", "aurora-0.25-pretrained.ckpt")
+model = model.to(DEVICE)
+
+predictions = [pred.to("cpu") for pred in rollout(model, batch, steps=num_steps)]
 ```
 
-**Steps:**
-1. Open NetCDF files (surface + atmospheric)
-2. Crop to region (58.25-70°N, 5-16.75°E)
-3. Extract timesteps T and T+6h
-4. Organize into Aurora's Batch format
+Important details:
 
-**Critical:** Ensures exactly 2 timesteps, 6 hours apart, with all required variables.
+- `DEVICE` selects CUDA when available; otherwise CPU. On CPU the rollout takes ~45 min in the dev container.
+- `rollout` returns a list of `Batch` objects, each with shape `(1, 1, 64, 112)` for surface variables. We immediately move them to CPU memory so downstream processing does not depend on GPU availability.
+- The script uses `num_steps=4` to produce 24 h of output. You can make it a CLI flag if you need experimentation.
 
-#### `run_forecast(model, initial_batch, num_steps=4)`
+### Persisting Output (`save_forecast_netcdf`)
+
+The helper extracts each scalar field, stacks them over the `time` dimension, and writes an `xarray.Dataset`:
 
 ```python
-def run_forecast(model, initial_batch, num_steps=4):
-    """Run autoregressive forecast rollout."""
-    predictions = []
-    current_batch = initial_batch
-    
-    for step in range(num_steps):
-        with torch.no_grad():
-            # Predict next timestep
-            pred_batch = model.forward(current_batch)
-            
-            # Extract prediction (first timestep of first sample)
-            pred_state = pred_batch[0, 0]  # Shape: [variables, lat, lon]
-            predictions.append(pred_state)
-            
-            # Update batch: [timestep_2, prediction] becomes new input
-            current_batch = create_batch_from_states(
-                current_batch[0, 1],  # Previous timestep 2
-                pred_state             # New prediction
-            )
-    
-    return predictions
+u10 = np.stack([pred.surf_vars["10u"][0, 0].cpu().numpy() for pred in predictions])
+# ... same for v10, t2m, msl
+
+ds = xr.Dataset(
+    {
+        "u10": (["valid_time", "latitude", "longitude"], u10),
+        "v10": (...),
+        "t2m": (...),
+        "msl": (...),
+    },
+    coords={
+        "valid_time": times,  # June 8 00/06/12/18 UTC
+        "latitude": lat,
+        "longitude": lon,
+    },
+)
 ```
 
-**Autoregressive loop:**
-```
-Input:  [T-6h, T]    → Predict [T+6h]
-Input:  [T, T+6h]    → Predict [T+12h]
-Input:  [T+6h, T+12h] → Predict [T+18h]
-Input:  [T+12h, T+18h] → Predict [T+24h]
-```
-
-**Key details:**
-- `torch.no_grad()` - Disable gradient computation (inference only)
-- `pred_batch[0, 0]` - Extract first timestep (Aurora outputs 1 step per rollout)
-- Sliding window - Last 2 states always form next input
-
-#### `save_forecast_netcdf(predictions, output_path, metadata)`
-
-```python
-def save_forecast_netcdf(predictions, output_path, metadata):
-    """Save predictions to NetCDF file."""
-    # Convert predictions to numpy arrays
-    temp_data = np.stack([p['t2m'].cpu().numpy() for p in predictions])
-    u_wind_data = np.stack([p['u10'].cpu().numpy() for p in predictions])
-    v_wind_data = np.stack([p['v10'].cpu().numpy() for p in predictions])
-    
-    # Create xarray Dataset
-    ds = xr.Dataset({
-        't2m': (['time', 'lat', 'lon'], temp_data),
-        'u10': (['time', 'lat', 'lon'], u_wind_data),
-        'v10': (['time', 'lat', 'lon'], v_wind_data),
-    }, coords={
-        'time': metadata['times'],
-        'lat': metadata['lats'],
-        'lon': metadata['lons'],
-    })
-    
-    # Add metadata
-    ds.attrs['forecast_reference_time'] = metadata['ref_time']
-    ds.attrs['model'] = 'Aurora-0.25-small'
-    
-    # Save to NetCDF
-    ds.to_netcdf(output_path)
-```
-
-**Output structure:**
-```
-aurora_forecast_june8.nc
-├── Dimensions: time=4, lat=48, lon=48
-├── Variables:
-│   ├── t2m[time, lat, lon] - 2m temperature (K)
-│   ├── u10[time, lat, lon] - 10m U wind (m/s)
-│   └── v10[time, lat, lon] - 10m V wind (m/s)
-└── Metadata:
-    ├── forecast_reference_time: "2025-06-07T18:00:00"
-    └── model: "Aurora-0.25-small"
-```
+Static variables (land-sea mask, geopotential, soil type) are copied into the dataset so converters and visualizations can reuse them if needed. The final NetCDF weighs ~6.4 MB.
 
 ---
 
-## 6. Required Variables Explained
+## 6. Required Variables & File Layout
 
-### Surface Variables
+### Surface & Static (`data/norway_surface.nc` / `data/norway_static.nc`)
 
-**File:** `4d2238a45558de23ef37ca2e27a0315.nc`
+| Variable | NetCDF name | Units | Purpose |
+|----------|-------------|-------|---------|
+| 10 m U wind | `u10` | m s⁻¹ | Zonal wind forcing at the surface |
+| 10 m V wind | `v10` | m s⁻¹ | Meridional wind forcing |
+| 2 m temperature | `t2m` | K | Near-surface thermal state |
+| Mean sea-level pressure | `msl` | Pa | Synoptic pressure pattern |
 
-| Variable | Name | Units | Role |
-|----------|------|-------|------|
-| **u10** | 10m U-wind | m/s | East-west wind component |
-| **v10** | 10m V-wind | m/s | North-south wind component |
-| **t2m** | 2m temperature | K | Near-surface temperature |
-| **msl** | Mean sea level pressure | Pa | Surface pressure field |
+Static fields live in `norway_static.nc` and load once per run:
 
-**Static variables (time-independent):**
+| Variable | NetCDF name | Notes |
+|----------|-------------|-------|
+| Land–sea mask | `lsm` | Binary mask used to sharpen coastal gradients |
+| Surface geopotential | `z` | Orography (m² s⁻²) |
+| Soil type | `slt` | ERA5 categorical soil representation |
 
-| Variable | Name | Units | Role |
-|----------|------|-------|------|
-| **lsm** | Land-sea mask | 0-1 | 0=ocean, 1=land |
-| **z** | Surface geopotential | m²/s² | Terrain elevation |
-| **slt** | Soil type | category | Land surface properties |
+### Atmospheric (`data/norway_atmospheric.nc`)
 
-### Atmospheric Variables
+The atmospheric file carries four pressure levels—1000, 925, 850, and 700 hPa—for each timestep.
 
-**File:** `4a1f46cd2447ab83c1f564af59d53023.nc`
+| Variable | NetCDF name | Units | Why Aurora needs it |
+|----------|-------------|-------|---------------------|
+| Geopotential | `z` | m² s⁻² | Height of each pressure surface |
+| Specific humidity | `q` | kg kg⁻¹ | Moisture transport, latent heating |
+| Temperature | `t` | K | Vertical temperature profile |
+| U wind | `u` | m s⁻¹ | Zonal wind at each level |
+| V wind | `v` | m s⁻¹ | Meridional wind at each level |
 
-**4 pressure levels:** 1000, 925, 850, 700 hPa
-
-| Variable | Name | Units | Role |
-|----------|------|-------|------|
-| **z** | Geopotential height | m²/s² | Height of pressure surface |
-| **q** | Specific humidity | kg/kg | Water vapor content |
-| **t** | Temperature | K | Air temperature |
-| **u** | U-wind | m/s | East-west wind |
-| **v** | V-wind | m/s | North-south wind |
-
-**Why multiple levels?**
-
-```
-700 hPa (~3000m) - Upper level winds, jet streams
-850 hPa (~1500m) - Mid-level moisture, temperature inversions
-925 hPa (~750m)  - Lower atmosphere, boundary layer
-1000 hPa (surface) - Surface conditions
-```
-
-Aurora models **3D atmospheric structure** - critical for:
-- Wind shear (turbulence, storm formation)
-- Temperature inversions (fog, pollution trapping)
-- Moisture transport (precipitation formation)
-- Jet stream dynamics (storm tracks)
+Sampling multiple levels lets Aurora reason about jet dynamics, frontal slopes, and moist instability. Removing a level breaks the model contract and raises key errors during batching.
 
 ---
 
 ## 7. NetCDF Structure Details
 
-### Input File Format (CDS ERA5)
+### ERA5 Inputs
 
-**Surface file structure:**
+**Surface (`norway_surface.nc`)**
+
 ```python
 <xarray.Dataset>
-Dimensions:  (time: 28, lat: 61, lon: 61)
+Dimensions:  (valid_time: 28, latitude: 64, longitude: 112)
 Coordinates:
-  * time     (time) datetime64[ns] 2025-06-01 ... 2025-06-07T18:00
-  * lat      (lat) float32 70.0 69.75 69.5 ... 58.5 58.25
-  * lon      (lon) float32 5.0 5.25 5.5 ... 16.5 16.75
+    * valid_time  (valid_time) datetime64[ns] 2025-06-01 ... 2025-06-07T18:00
+    * latitude    (latitude) float32 72.75 72.5 ... 57.25 57.0
+    * longitude   (longitude) float32 4.0 4.25 ... 31.5 31.75
 Data variables:
-    u10      (time, lat, lon) float32 ...
-    v10      (time, lat, lon) float32 ...
-    t2m      (time, lat, lon) float32 ...
-    msl      (time, lat, lon) float32 ...
-    lsm      (lat, lon) float32 ...          # No time dimension
-    z        (lat, lon) float32 ...
-    slt      (lat, lon) float32 ...
+        u10  (valid_time, latitude, longitude) float32 ...
+        v10  (valid_time, latitude, longitude) float32 ...
+        t2m  (valid_time, latitude, longitude) float32 ...
+        msl  (valid_time, latitude, longitude) float32 ...
 ```
 
-**Atmospheric file structure:**
+Static fields (`norway_static.nc`) mirror the latitude/longitude coordinates but lack a time axis.
+
+**Atmospheric (`norway_atmospheric.nc`)**
+
 ```python
 <xarray.Dataset>
-Dimensions:  (time: 28, level: 4, lat: 61, lon: 61)
+Dimensions:  (valid_time: 28, pressure_level: 4, latitude: 64, longitude: 112)
 Coordinates:
-  * time     (time) datetime64[ns] 2025-06-01 ... 2025-06-07T18:00
-  * level    (level) int32 1000 925 850 700
-  * lat      (lat) float32 70.0 69.75 ... 58.25
-  * lon      (lon) float32 5.0 5.25 ... 16.75
+    * valid_time     (valid_time) datetime64[ns] ...
+    * pressure_level (pressure_level) int32 1000 925 850 700
+    * latitude       (latitude) float32 ...
+    * longitude      (longitude) float32 ...
 Data variables:
-    z        (time, level, lat, lon) float32 ...
-    q        (time, level, lat, lon) float32 ...
-    t        (time, level, lat, lon) float32 ...
-    u        (time, level, lat, lon) float32 ...
-    v        (time, level, lat, lon) float32 ...
+        z  (valid_time, pressure_level, latitude, longitude) float32 ...
+        q  (...)
+        t  (...)
+        u  (...)
+        v  (...)
 ```
 
-### Output File Format (Aurora Predictions)
-
-**Cropped to 48×48 with only forecasted variables:**
+### Aurora Output (`norway_june8_forecast.nc`)
 
 ```python
 <xarray.Dataset>
-Dimensions:  (time: 4, lat: 48, lon: 48)
+Dimensions:  (valid_time: 4, latitude: 64, longitude: 112)
 Coordinates:
-  * time     (time) datetime64[ns] 2025-06-08 ... 2025-06-08T18:00
-  * lat      (lat) float32 70.0 69.75 ... 58.5 58.25
-  * lon      (lon) float32 5.0 5.25 ... 16.5 16.75
+    * valid_time  (valid_time) datetime64[ns] 2025-06-08 ... 2025-06-08T18:00
+    * latitude    (latitude) float32 72.75 ... 57.0
+    * longitude   (longitude) float32 4.0 ... 31.75
 Data variables:
-    t2m      (time, lat, lon) float32 ...    # Temperature only
-    u10      (time, lat, lon) float32 ...    # U-wind
-    v10      (time, lat, lon) float32 ...    # V-wind
+        t2m  (valid_time, latitude, longitude) float32 ...
+        u10  (valid_time, latitude, longitude) float32 ...
+        v10  (valid_time, latitude, longitude) float32 ...
+        msl  (valid_time, latitude, longitude) float32 ...
 Attributes:
-    forecast_reference_time: 2025-06-07T18:00:00
-    model: Aurora-0.25-small
+        forecast_reference_time: 2025-06-07T18:00:00
+        model: Aurora-0.25-pretrained
 ```
 
-**Why only 3 variables?** Frontend visualizes temperature. Wind components included for potential wind speed/direction display.
+Static fields (`lsm`, `z`, `slt`) are appended as 2-D variables so downstream tooling (including the TypeScript converter) has access to land/ocean masks and elevation data when building visualizations.
 
 ---
 
-## 8. Performance Analysis
+## 8. Performance Snapshot
 
-### Computational Cost
+### Runtime Benchmarks (4 steps, 64 × 112)
 
-**GPU (NVIDIA A100 40GB):**
-```
-Model loading:     30 sec
-Data loading:      15 sec
-Inference (4 steps): 3 min
-Saving output:     10 sec
-Total:            ~5 min
-```
+| Hardware | Model load | Rollout | Save | Total |
+|----------|------------|---------|------|-------|
+| GPU (A100 40 GB) | 45 s | 5 min | 10 s | ~6 min |
+| GPU (T4 16 GB) | 70 s | 7 min | 10 s | ~8 min |
+| CPU (Devcontainer, 16 vCPU) | 2 min | 42 min | 15 s | ~45 min |
 
-**CPU (16-core Xeon):**
-```
-Model loading:     45 sec
-Data loading:      20 sec
-Inference (4 steps): 16 min
-Saving output:     15 sec
-Total:            ~18 min
-```
+Numbers assume the Aurora checkpoint is already cached. The first run downloads ~5 GB, which can add several minutes depending on bandwidth.
 
-### Memory Requirements
+### Memory & Disk
 
-**GPU:**
-- VRAM: 8-12 GB
-- System RAM: 4 GB
-
-**CPU:**
-- System RAM: 6-8 GB
-
-**Disk:**
-- Model checkpoint: 5.03 GB
-- Input data: 4.7 MB
-- Output data: 187 KB
+- **VRAM:** 9–12 GB during rollout on GPU
+- **System RAM:** 6 GB (CPU path)
+- **Disk:**
+    - Aurora checkpoint: ~5 GB (`~/.cache/huggingface/`)
+    - ERA5 inputs: ~8.5 MB (`norway_surface.nc`, `norway_atmospheric.nc`, `norway_static.nc`)
+    - Forecast output: ~6.4 MB (`norway_june8_forecast.nc`)
 
 ---
 
-## 9. Common Issues & Solutions
+## 9. Common Issues & Fixes
 
 ### Grid Dimension Errors
 
-**Error:**
 ```
-ValueError: Grid dimensions (50, 50) not divisible by patch_size (16)
+ValueError: grid dimensions (60, 112) not divisible by patch_size (16)
 ```
 
-**Solution:** Adjust region to make dimensions divisible by 16:
+**Fix:** Ensure both axes obey the 16-cell rule.
+
 ```python
-# BAD: 50×50 grid
-lat_range = (58.0, 70.5)  # 50 cells at 0.25°
-
-# GOOD: 48×48 grid
-lat_range = (58.25, 70.0)  # 48 cells at 0.25°
+lat_cells = int((lat_max - lat_min) / 0.25)
+lon_cells = int((lon_max - lon_min) / 0.25)
+assert lat_cells % 16 == 0
+assert lon_cells % 16 == 0
 ```
 
-### Model Divergence
+The bundled downloads already satisfy this. If you customize the bounds, adjust them in 0.25° increments until both counts divide by 16.
 
-**Symptom:** Temperatures < -50°C or > 50°C
+### Output Divergence
 
-**Causes:**
-- Too many forecast steps (>8 for 48×48 grid)
-- Missing input variables
-- Corrupted input data
+**Symptoms:** Unrealistic temperatures (e.g., below −40 °C or above 35 °C) or striped patterns after step 5.
 
-**Solution:**
+**Fixes:**
+
 ```python
-# Reduce forecast horizon
-num_steps = 4  # 24h - stable
-# num_steps = 8  # 48h - test carefully
-# num_steps = 16  # 96h - likely diverges on small grids
+# Keep horizons short
+forecast = run_forecast(batch, num_steps=4)
+
+# If experimenting, ramp slowly
+# forecast = run_forecast(batch, num_steps=6)
 ```
+
+Then inspect the logged min/max from `save_forecast_netcdf`. If values explode, revert to four steps or expand the domain.
 
 ### CUDA Out of Memory
 
-**Error:**
 ```
 RuntimeError: CUDA out of memory
 ```
 
-**Solutions:**
-1. **Reduce batch size** (line 40 in script):
-   ```python
-   batch_size = 1  # Already minimal in example
-   ```
+**Options:**
 
-2. **Use CPU:**
-   ```bash
-   python3 run_aurora_inference.py --device cpu
-   ```
-
-3. **Clear GPU memory:**
-   ```python
-   torch.cuda.empty_cache()
-   ```
+1. Free GPU memory (`nvidia-smi --gpu-reset` on bare metal, close other notebooks, etc.).
+2. Force CPU execution: `python3 scripts/run_aurora_inference.py --device cpu` (slow but reliable).
+3. If you added extra variables, remove them—batch size is already minimal.
 
 ---
 
 ## 10. Extending the Example
 
-### Change Region
+### Change the Domain
 
-Modify `run_aurora_inference.py` lines 25-30:
-
-```python
-# Original: Norway coastal
-grid_bounds = {
-    'lat_min': 58.25, 'lat_max': 70.0,   # 48 cells
-    'lon_min': 5.0,   'lon_max': 16.75   # 48 cells
-}
-
-# Example: North Sea (must be divisible by 16)
-grid_bounds = {
-    'lat_min': 52.0, 'lat_max': 60.0,    # 32 cells (32÷16=2)
-    'lon_min': 0.0,  'lon_max': 8.0      # 32 cells
-}
-```
-
-**Verify:**
-```python
-lat_cells = int((lat_max - lat_min) / 0.25)
-lon_cells = int((lon_max - lon_min) / 0.25)
-assert lat_cells % 16 == 0, f"Lat cells {lat_cells} not divisible by 16"
-assert lon_cells % 16 == 0, f"Lon cells {lon_cells} not divisible by 16"
-```
-
-### Add Variables
-
-To output additional variables (e.g., pressure, humidity):
-
-1. **Modify `save_forecast_netcdf()`** to include more variables from predictions
-2. **Update `build_forecast_module.py`** to extract new variables
-3. **Update frontend colormap** in `HeatmapOverlay.tsx`
-
-### Extend Forecast Horizon
+Region bounds live near the top of `run_aurora_inference.py`:
 
 ```python
-# Test incrementally
-num_steps = 6  # 36h
-num_steps = 8  # 48h
-num_steps = 12  # 72h (3 days)
+LAT_MIN, LAT_MAX = 57.0, 72.75
+LON_MIN, LON_MAX = 4.0, 31.75
 ```
 
-**Watch for divergence:** Check output temperatures stay within realistic bounds (-20°C to 40°C for summer Norway).
+Update those values (or add CLI flags) to target another geography. After editing, recompute cell counts to confirm patch compatibility:
+
+```python
+lat_cells = int((LAT_MAX - LAT_MIN) / 0.25) + 1
+lon_cells = int((LON_MAX - LON_MIN) / 0.25) + 1
+assert lat_cells % 16 == 0
+assert lon_cells % 16 == 0
+```
+
+Re-run the ERA5 download helper (`assets/scripts/download_era5_subset.py`) with the new bounds so the NetCDF files match.
+
+### Export More Variables
+
+The forecast dataset already contains `u10`, `v10`, `t2m`, and `msl`. To surface additional fields:
+
+1. Confirm the Aurora `Batch` exposes them (`pred.surf_vars` or `pred.atmos_vars`).
+2. Append them in `save_forecast_netcdf` and add metadata describing units.
+3. Update `scripts/build_forecast_module.py` and the frontend components to render the new variable.
+
+### Longer Horizons
+
+Experiment gradually:
+
+```python
+forecast = run_forecast(batch, num_steps=6)   # 36 h
+forecast = run_forecast(batch, num_steps=8)   # 48 h
+```
+
+Check the logged stats after each run. If temperatures explode or the UI shows edge artifacts, scale back or enlarge the spatial domain before going further.
 
 ---
 
 ## 11. Validation & Debugging
 
-### Check Input Data
+### Inspect Inputs Quickly
 
 ```bash
-python3 scripts/quick_inspect.py data/4d2238a45558de23ef37ca2e27a0315.nc
+python3 assets/scripts/describe_netcdf.py data/norway_surface.nc
 ```
 
-**Output:**
-```
-File: 4d2238a45558de23ef37ca2e27a0315.nc
-Dimensions: time=28, lat=61, lon=61
-Variables: u10, v10, t2m, msl, lsm, z, slt
-Time range: 2025-06-01 00:00 to 2025-06-07 18:00
-Grid: 58.25-70.0°N, 5.0-16.75°E
-✓ All required surface variables present
-```
+Expect 28 timesteps (June 1–7) and 64 × 112 grids with the four surface variables. Run the same command for `norway_atmospheric.nc` and verify the four pressure levels.
 
-### Visualize Predictions
+### Plot a Forecast Slice
 
 ```python
 import xarray as xr
 import matplotlib.pyplot as plt
 
-# Load forecast
-ds = xr.open_dataset('data/aurora_forecast_june8.nc')
+ds = xr.open_dataset("data/norway_june8_forecast.nc")
 
-# Plot temperature at first timestep
-plt.figure(figsize=(10, 8))
-ds.t2m.isel(time=0).plot()
-plt.title('Aurora Forecast: June 8, 00:00')
-plt.savefig('forecast_t0.png')
+plt.figure(figsize=(9, 6))
+ds.t2m.isel(valid_time=0).plot()
+plt.title("Aurora forecast – 8 Jun 00 UTC")
+plt.tight_layout()
+plt.savefig("forecast_t0.png", dpi=150)
 ```
 
-### Compare Against Observations
+### Compare with Observations
 
-Download actual June 8 observations from CDS and compute RMSE:
+If you download ERA5 observations for June 8:
 
 ```python
-obs = xr.open_dataset('data/cds_june8_observations.nc')
-pred = xr.open_dataset('data/aurora_forecast_june8.nc')
+obs = xr.open_dataset("data/norway_surface_june8.nc")
+pred = xr.open_dataset("data/norway_june8_forecast.nc")
 
-# Align grids
-obs_matched = obs.interp_like(pred)
-
-# Compute RMSE
-rmse = np.sqrt(((pred.t2m - obs_matched.t2m) ** 2).mean())
-print(f"Temperature RMSE: {rmse:.2f} K")
+obs = obs.interp_like(pred)
+rmse = float(((pred.t2m - obs.t2m) ** 2).mean() ** 0.5)
+print(f"2m temperature RMSE: {rmse:.2f} K")
 ```
+
+Anything beyond ~2 K RMSE indicates either a bad input pull or a long forecast horizon introducing drift.
 
 ---
 
@@ -656,16 +476,16 @@ print(f"Temperature RMSE: {rmse:.2f} K")
 ## Summary
 
 **Key takeaways:**
-- Aurora needs **2 timesteps** to capture atmospheric state + trends
-- Grid dimensions **must be divisible by 16** (patch encoder requirement)
-- **24-hour forecasts** stable on 48×48 grid; longer horizons may diverge
-- Input requires **surface + atmospheric variables** at multiple levels
-- Autoregressive rollout: Each prediction becomes input for next step
+- Aurora needs **two six-hour timesteps** to derive both state and tendency information.
+- Keep spatial dimensions **aligned to 16-cell patches**; the demo uses 64 × 112 for mainland coverage.
+- **24-hour horizons** remain stable on regional domains; extend cautiously and monitor diagnostics.
+- Surface, static, and multi-level atmospheric fields are all required to build the Aurora `Batch`.
+- The rollout is autoregressive: every new prediction feeds the next step and is saved to NetCDF for downstream tooling.
 
 **Next steps:**
-- [prototyping-guide.md](prototyping-guide.md) - Adapt for your scenario
-- [application-patterns.md](application-patterns.md) - Explore use cases
-- [emergency-fixes.md](emergency-fixes.md) - Troubleshooting reference
+- [expand-norway-example.md](expand-norway-example.md) – Customize regions, dates, and variables.
+- [application-patterns.md](application-patterns.md) – See how teams integrate forecasts.
+- [troubleshooting.md](troubleshooting.md) – Triage unexpected runtime issues.
 
 ---
 

@@ -13,6 +13,9 @@ export function convertToGrid(
   data: number[][];
   bounds: [[number, number], [number, number]];
 } {
+  // Normalize longitudes from 0-360 to -180 to 180 range for Leaflet compatibility
+  const normalizeLon = (lon: number) => (lon > 180 ? lon - 360 : lon);
+
   // Find spatial bounds
   let minLat = Infinity,
     maxLat = -Infinity;
@@ -20,10 +23,11 @@ export function convertToGrid(
     maxLon = -Infinity;
 
   for (const cell of step.cells) {
+    const lon = normalizeLon(cell.longitude);
     minLat = Math.min(minLat, cell.latitude);
     maxLat = Math.max(maxLat, cell.latitude);
-    minLon = Math.min(minLon, cell.longitude);
-    maxLon = Math.max(maxLon, cell.longitude);
+    minLon = Math.min(minLon, lon);
+    maxLon = Math.max(maxLon, lon);
   }
 
   // Determine grid resolution from data
@@ -32,7 +36,9 @@ export function convertToGrid(
   ).sort((a, b) => b - a); // Descending (north to south)
 
   const lons = Array.from(
-    new Set(step.cells.map((c) => Math.round(c.longitude * 100) / 100))
+    new Set(
+      step.cells.map((c) => Math.round(normalizeLon(c.longitude) * 100) / 100)
+    )
   ).sort((a, b) => a - b); // Ascending (west to east)
 
   // Extract value based on selected variable
@@ -51,7 +57,7 @@ export function convertToGrid(
   const gridMap = new Map<string, number>();
   for (const cell of step.cells) {
     const lat = Math.round(cell.latitude * 100) / 100;
-    const lon = Math.round(cell.longitude * 100) / 100;
+    const lon = Math.round(normalizeLon(cell.longitude) * 100) / 100;
     gridMap.set(`${lat},${lon}`, getValue(cell));
   }
 

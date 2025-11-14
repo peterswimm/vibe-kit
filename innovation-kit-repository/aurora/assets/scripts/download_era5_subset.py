@@ -5,12 +5,14 @@ Requires:
     pip install cdsapi
 
 Before running:
-    1. Create an account at https://cds.climate.copernicus.eu/ (ERA5)
-       or https://ads.atmosphere.copernicus.eu/ (CAMS).
-    2. Accept the terms of use for the datasets you plan to download.
-    3. Write your API key to ~/.cdsapirc (ERA5) or ~/.adsapirc (CAMS), e.g.:
-        url: https://cds.climate.copernicus.eu/api
-        key: <UID>:<API_KEY>
+     1. Create an account at https://cds.climate.copernicus.eu/ (ERA5)
+         or https://ads.atmosphere.copernicus.eu/ (CAMS).
+     2. Accept the terms of use for the datasets you plan to download.
+     3. Set credentials via environment variables (preferred):
+          export CDS_API_KEY="<UID>:<API_KEY>"
+          # Optional if you use a mirrored endpoint
+          export CDS_API_URL="https://cds.climate.copernicus.eu/api"
+         Existing ~/.cdsapirc or ~/.adsapirc files still work if you already have them configured.
 
 Example:
     python download_era5_subset.py \
@@ -23,14 +25,19 @@ Example:
 
 Switch --dataset to "reanalysis-era5-pressure-levels" and add --levels if you
 need the atmospheric cube. For CAMS, change --dataset to
-"cams-global-atmospheric-composition-forecasts" and point the --auth-url flag
+"cams-global-atmospheric-composition-forecasts" and point the --api-url flag
 at the ADS endpoint.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+
+
+DEFAULT_CDS_API_URL = "https://cds.climate.copernicus.eu/api"
+DEFAULT_ADS_API_URL = "https://ads.atmosphere.copernicus.eu/api"
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,12 +75,21 @@ def parse_args() -> argparse.Namespace:
         help="Leadtime hours (needed for CAMS forecasts, e.g. 0 3 6)",
     )
     parser.add_argument(
+        "--api-url",
         "--auth-url",
-        default="https://cds.climate.copernicus.eu/api",
-        help="Override API URL (use ADS URL for CAMS)",
+        dest="api_url",
+        default=None,
+        help="Override API URL (use ADS endpoint for CAMS datasets)",
     )
     parser.add_argument("--target", required=True, help="Output NetCDF/ZIP path")
     return parser.parse_args()
+
+
+def infer_default_api_url(dataset: str) -> str:
+    dataset_lower = dataset.lower()
+    if "cams" in dataset_lower:
+        return DEFAULT_ADS_API_URL
+    return DEFAULT_CDS_API_URL
 
 
 def build_request(args: argparse.Namespace) -> dict:
@@ -112,10 +128,20 @@ def main() -> None:
     target = Path(args.target).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    client = cdsapi.Client(url=args.auth_url)
+    env_key = os.getenv("CDS_API_KEY") or os.getenv("ADS_API_KEY")
+    env_url = os.getenv("CDS_API_URL") or os.getenv("ADS_API_URL")
+
+    default_url = args.api_url or infer_default_api_url(args.dataset)
+    client_url = env_url or default_url
+
+    if env_key:
+        print("Detected API key in environment; using explicit credential.")
+        client = cdsapi.Client(url=client_url, key=env_key)
+    else:
+        client = cdsapi.Client(url=client_url)
     request = build_request(args)
 
-    print(f"Submitting request to {args.auth_url} for dataset {args.dataset}...")
+    print(f"Submitting request to {client_url} for dataset {args.dataset}...")
     for key, value in request.items():
         print(f"  {key}: {value}")
 

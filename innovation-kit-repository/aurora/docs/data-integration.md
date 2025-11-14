@@ -6,9 +6,9 @@
 
 **WeatherBench2 Zarr/NetCDF**: HRES T0 and analysis at 0.25°/0.1° stored in Google Cloud buckets. (source: example_hres_t0.html; example_hres_0.1.html)
 
-**CAMS NetCDF ZIP**: Air-pollution forecasts (0.4°) fetched from the Atmosphere Data Store; static features served from Hugging Face. (source: example_cams.html)
+**CAMS NetCDF ZIP**: Air-pollution forecasts (0.4°) fetched from the Atmosphere Data Store; static features served from Hugging Face. _(Not bundled; download manually before running the example.)_ (source: example_cams.html)
 
-**ECMWF MARS GRIB**: HRES-WAM ocean wave analyses for 0.25° inference. (source: example_wave.html)
+**ECMWF MARS GRIB**: HRES-WAM ocean wave analyses for 0.25° inference. _(Not bundled; request through ECMWF MARS.)_ (source: example_wave.html)
 
 > **Why we still need ERA5:** The bundled Hurricane Erin track files are derived summaries for the cyclone use case; they don’t include the gridded tensors that `aurora.Batch` expects. To run the end-to-end quick start or fine-tune workflows, you still need to pull ERA5 (or CAMS/WeatherBench2) slices directly from Copernicus using the script below.
 
@@ -36,12 +36,16 @@ When adapting the Norway example to your region or time period, use the provided
 
 **Prerequisites:**
 1. [Create a Copernicus account and accept ERA5 licences](https://cds.climate.copernicus.eu/api-how-to).
-2. Save your API key to `~/.cdsapirc`:
-    ```
-    url: https://cds.climate.copernicus.eu/api
-    key: <UID>:<API_KEY>
+2. Add your key to the environment (recommended):
+    ```bash
+    # .env or shell profile
+    CDS_API_KEY="<UID>:<API_KEY>"
+    # Optional if you mirror the API endpoint
+    # CDS_API_URL="https://cds.climate.copernicus.eu/api"
     ```
 3. Install the CDS API client: `pip install cdsapi`
+
+> Already have `~/.cdsapirc` from other projects? That continues to work, but it’s no longer required for the Aurora kit.
 
 **Download surface data:**
 ```bash
@@ -50,9 +54,10 @@ python .vibe-kit/innovation-kits/aurora/assets/scripts/download_era5_subset.py \
     --variables 2m_temperature 10m_u_component_of_wind 10m_v_component_of_wind mean_sea_level_pressure \
     --year 2025 --month 06 --days 01 02 03 04 05 06 07 \
     --hours 00 06 12 18 \
-    --area 70 5 58.25 16.75 \
+    --area 72.75 4 57 31.75 \
     --target data/my-region-surface.nc
 ```
+The command picks up `CDS_API_KEY` automatically (mirroring the Aurora Finetune helper utilities) while still honouring credentials from `~/.cdsapirc` if present.
 
 ### Manual Method: CDS Web Interface
 
@@ -138,6 +143,8 @@ batch = Batch(
 ```
 
 ## Loading CAMS (air quality)
+
+> **Heads-up:** The Aurora kit does *not* ship CAMS NetCDF samples. Download the ZIP payload from the Atmosphere Data Store first, then follow the steps below.
 
 ```python
 from huggingface_hub import hf_hub_download

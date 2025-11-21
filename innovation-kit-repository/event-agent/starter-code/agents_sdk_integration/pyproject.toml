@@ -1,0 +1,24 @@
+[project]
+name = "event-agent-sdk-integration"
+version = "0.1.0"
+description = "Full migration scaffold of Event Agent onto Microsoft 365 Agents SDK"
+requires-python = ">=3.11"
+
+[project.dependencies]
+pydantic = ">=2.7"
+pydantic-settings = ">=2.2"
+requests = ">=2.32"
+msal = ">=1.28"
+# Placeholder packages; replace with pinned versions from Agents-for-python
+microsoft-agents-activity = ">=0.5.0"
+microsoft-agents-hosting-core = ">=0.5.0"
+microsoft-agents-hosting-aiohttp = ">=0.5.0"
+microsoft-agents-authentication-msal = ">=0.5.0"
+azure-storage-blob = ">=12.19.0"
+azure-cosmos = ">=4.7.0"
+
+[tool.black]
+line-length = 100
+
+[tool.flake8]
+max-line-length = 100

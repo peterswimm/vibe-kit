@@ -1,0 +1,17 @@
+name: event-agent
+version: 0.1.0
+description: Attendee-facing agent kit recommending MSR projects, demos, and sessions with explainable rankings using Graph signals, Work IQ, and event feeds. Includes production-ready starter code package.
+entry: INNOVATION_KIT.md
+assets:
+  - assets/scripts/run_event_agent_demo.py
+  - starter-code/event_agent/
+docs:
+  - docs/quick-start.md
+  - docs/technical-guide.md
+  - docs/application-patterns.md
+  - docs/troubleshooting.md
+tags:
+  - events
+  - recommendations
+  - itinerary
+  - microsoft-graph

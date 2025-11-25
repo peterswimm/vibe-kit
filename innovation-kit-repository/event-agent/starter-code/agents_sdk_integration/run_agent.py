@@ -86,25 +86,64 @@ def parse_args():
 
 def run_sdk(port: int):  # pragma: no cover - requires SDK
     if not HAVE_SDK:
-        print(
-            "SDK not installed. Install microsoft-agents packages: microsoft-agents-activity microsoft-agents-hosting-core microsoft-agents-hosting-aiohttp"
-        )
+        print("SDK packages not available; install microsoft-agents-* to enable.")
         return
+    try:
+        from aiohttp import web  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        print(f"Unable to import aiohttp: {e}")
+        return
+    # Lightweight local hosting wrapper (does not yet use CloudAdapter due to additional
+    # connection/token requirements). It simulates a TurnContext sufficient for our
+    # EventGuideActivityHandler to process 'recommend:' and 'explain:' messages.
     try:
         from event_handler import EventGuideActivityHandler  # type: ignore
     except ImportError:
         try:
             from .event_handler import EventGuideActivityHandler  # type: ignore
-        except ImportError:
-            print("Could not import EventGuideActivityHandler.")
+        except ImportError as e:  # noqa: BLE001
+            print(f"Could not import EventGuideActivityHandler: {e}")
             return
     handler = EventGuideActivityHandler()
-    print(f"Starting Event Guide Agent on port {port} (aiohttp)...")
-    try:
-        start_agent_process(handler, port=port)
-    except Exception as e:  # noqa: BLE001
-        print(f"Failed to start agent process: {e}")
-        print("Ensure microsoft-agents hosting packages are installed and configured.")
+
+    class FakeTurnContext:  # pragma: no cover - simple adapter shim
+        def __init__(self, activity):
+            self.activity = activity
+            self._response = None
+
+        async def send_activity(self, message):  # handler expects awaited call
+            if isinstance(message, str):
+                try:
+                    self._response = json.loads(message)
+                except Exception:  # noqa: BLE001
+                    self._response = {"text": message}
+            else:
+                self._response = message
+
+    async def messages(request):  # type: ignore
+        data = await request.json()
+
+        # Build minimal activity object with 'text' and optional 'value'
+        class ActivityObj:  # noqa: D401 - simple container
+            pass
+
+        activity = ActivityObj()
+        for k, v in data.items():
+            setattr(activity, k, v)
+        tc = FakeTurnContext(activity)
+        await handler.on_message_activity(tc)
+        return web.json_response(tc._response or {"status": "no response"})
+
+    app = web.Application()
+    app.router.add_post("/api/messages", messages)
+    print(
+        f"Starting lightweight Event Guide server on port {port} (POST /api/messages)"
+    )
+    print("Example recommend:")
+    print(
+        f"curl -X POST http://localhost:{port}/api/messages -H 'Content-Type: application/json' -d '{{\"text\":\"recommend:AI safety, agents\"}}'"
+    )
+    web.run_app(app, port=port)
 
 
 def _try_token():

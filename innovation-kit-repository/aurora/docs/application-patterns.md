@@ -5,6 +5,7 @@
 This guide shows real-world Aurora applications across different domains. Each pattern includes code examples you can adapt for your scenario.
 
 **Learning approach:**
+
 1. **Norway prototype first** - See [quick-start.md](quick-start.md) for complete working example
 2. **Understand patterns below** - Domain-specific adaptations
 3. **Adapt for your use case** - Combine patterns with [expand-norway-example.md](expand-norway-example.md)
@@ -24,6 +25,7 @@ This guide shows real-world Aurora applications across different domains. Each p
 **Reference implementation:** [assets/norway-example/](.vibe-kit/innovation-kits/aurora/assets/norway-example/)
 
 **Key characteristics:**
+
 - Expanded mainland grid (64×112 = 7,168 points; 4×7 Aurora patches)
 - 24-hour stable horizon (4 steps × 6h) with clean coastal boundaries
 - Interactive React + Fluent UI frontend with observation/prediction toggle
@@ -59,6 +61,7 @@ save_forecast(predictions, "data/norway_june8_forecast.nc")
 ```
 
 **Adaptation tips:**
+
 - Update `GRID_BOUNDS` to your region (keep both dimensions divisible by 16)
 - Re-run `scripts/build_forecast_module.py` for observations **and** predictions after producing new NetCDF files
 - Extend to 48h (8 steps) once stability is confirmed; larger buffers (≥80×128) handle longer rollouts better
@@ -75,14 +78,17 @@ save_forecast(predictions, "data/norway_june8_forecast.nc")
 **Recommended approach**: Use `setup_region.py` (automates download, template copying, frontend generation):
 
 # 1. Configure CDS credentials (one-time setup)
+
 ```bash
 cd .vibe-kit/innovation-kits/aurora/assets
 cp .env.example .env
 # Edit .env and add: CDS_API_KEY=your-api-key-here
 ```
+
 Pause and instruct the user to edit `.env` with their CDS API key before proceeding.
 
 # 2. Generate region-specific prototype (example: California)
+
 ```bash
 cd scripts
 python3 setup_region.py \
@@ -323,4 +329,3 @@ print(f"RMSE (K): {rmse:.3f}")
 
 - Stream data with Zarr chunks from WeatherBench2 and regrid with `Batch.regrid` to 0.1° only when required.  
 - Offload multi-step rollouts to Azure AI Foundry using Blob storage channels.
-

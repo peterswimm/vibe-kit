@@ -14,9 +14,14 @@ except ImportError:  # pragma: no cover - SDK absent
     HAVE_SDK = False
     TurnContext = object  # type: ignore
 
-from .activities import RecommendActivity, ExplainActivity
-from .integration_telemetry import StructuredTelemetry
-from .storage import StorageFacade
+try:  # Support running as loose script without package context
+    from .activities import RecommendActivity, ExplainActivity  # type: ignore
+    from .integration_telemetry import StructuredTelemetry  # type: ignore
+    from .storage import StorageFacade  # type: ignore
+except ImportError:  # pragma: no cover - fallback when executed directly
+    from activities import RecommendActivity, ExplainActivity  # type: ignore
+    from integration_telemetry import StructuredTelemetry  # type: ignore
+    from storage import StorageFacade  # type: ignore
 
 
 class EventGuideActivityHandler:  # pragma: no cover - runtime depends on SDK
